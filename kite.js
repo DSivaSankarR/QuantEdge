@@ -223,8 +223,43 @@ async function fetchKiteHistorical(symbol, interval, range, env, accessToken) {
 // Maps NSE symbol → numeric instrument token
 // Cached 24 hours — tokens rarely change
 // ═══════════════════════════════════════════════════════════
+ async function getInstrumentToken(symbol, env, accessToken) {
+  const cache    = caches.default;
+  const cacheKey = new Request(`https://cache.quantedge/instruments/${symbol}`);
 
-async function getInstrumentToken(symbol, env, accessToken) {
+  const cached = await cache.match(cacheKey);
+  if (cached) {
+    const body = await cached.json();
+    return body.token;
+  }
+
+  try {
+    // Use Kite quote endpoint — much lighter than fetching full CSV
+    const r = await fetch(`${KITE_BASE}/quote?i=NSE:${symbol}`, {
+      headers: {
+        'X-Kite-Version': '3',
+        'Authorization':  `token ${env.KITE_API_KEY}:${accessToken}`
+      }
+    });
+
+    if (!r.ok) return null;
+
+    const data = await r.json();
+    const token = data?.data?.[`NSE:${symbol}`]?.instrument_token;
+    if (!token) return null;
+
+    // Cache for 24 hours
+    const resp = new Response(JSON.stringify({ token: String(token), symbol }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': `max-age=${CACHE_TTL_INSTRUMENTS}` }
+    });
+    await cache.put(cacheKey, resp.clone());
+    return String(token);
+
+  } catch(_) {
+    return null;
+  }
+}
   const cache    = caches.default;
   const cacheKey = new Request(`https://cache.quantedge/instruments/${symbol}`);
 
