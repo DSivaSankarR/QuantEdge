@@ -1,0 +1,10 @@
+name = "quantedge-kite"
+main = "kite.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "KITE_STORE"
+id = "7ac00c00ce884b8aab1c1f24920d41f7"
+
+[vars]
+KITE_API_KEY = "isb6s7pfdzqg8n8a"
