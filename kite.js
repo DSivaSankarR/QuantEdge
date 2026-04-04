@@ -23,7 +23,7 @@
  *   Token key:    access_token  (written automatically on /auth)
  *
  * CACHE:
- *   Cloudflare edge cache — 5 min for price data
+ *   Cloudflare edge cache — 5 min for price data 
  *   Instrument tokens cached 24 hours
  *
  * ═══════════════════════════════════════════════════════
