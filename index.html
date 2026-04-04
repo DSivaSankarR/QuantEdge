@@ -2537,6 +2537,7 @@ async function analyseStock(symbol){
 
   return{
     symbol,name:meta.longName||meta.shortName||symbol,
+dataSource: meta.dataSource || 'yf',
     cmp:parseFloat(cmp.toFixed(2)),changePct:parseFloat(dayChg.toFixed(2)),
     score,verdict,comp,
     rsiD:parseFloat((_rD||0).toFixed(1)),rsiW:parseFloat((_rW||0).toFixed(1)),rsiM:parseFloat((_rM||0).toFixed(1)),
