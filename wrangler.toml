@@ -7,8 +7,10 @@ compatibility_flags = ["nodejs_compat"]
 binding = "KITE_STORE"
 id = "7ac00c00ce884b8aab1c1f24920d41f7"
 
+[[d1_databases]]
+binding = "QE_DB"
+database_name = "quantedge_history"
+database_id = "163c1f09-3b18-4981-836d-2163cada7de3"
+
 [vars]
 KITE_API_KEY = "x9atdliuwa1evccb"
-
-
-
