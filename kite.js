@@ -1,5 +1,50 @@
 /**
- * QuantEdge Cloudflare Worker — kite.js v4.15
+ * QuantEdge Cloudflare Worker — kite.js v4.17
+ *
+ * Changelog v4.17 (12-Jun-2026) — SELF-AUDIT FIX: time-aware forming-bar guard.
+ *   Adversarial audit of v4.16 (11-scenario run-time matrix) caught a regression
+ *   BEFORE deployment: the v4.16 guard dropped today's bar UNCONDITIONALLY when
+ *   the date matched, which is correct intra-market but WRONG after close — it
+ *   would have staled every post-close run to yesterday's data (last night's
+ *   20:46 run found 3 candidates precisely BECAUSE it used today's completed,
+ *   full-volume bar). v4.16 was never deployed.
+ *   FIX: drop today's bar only while it is still forming — before 15:45 IST
+ *   (15:30 close + closing-session buffer). From 15:45 the bar is complete and
+ *   is KEPT. Verified across 11 scenarios incl. open/midday/pre-close scans
+ *   (drop), 16:00 summary and evening/late-night runs (keep), weekend/holiday/
+ *   Monday-morning stale-bar cases (keep), IST midnight boundary (keep), and a
+ *   defensive bogus future-dated bar (safe drop).
+ *   Known benign window: 15:45-16:00 IST live already holds today's completed
+ *   bar while D1 gains it at the 16:00 daily update, so /d1/verify inside that
+ *   15-minute window can say REVIEW; no scheduled scan runs there. Verify after
+ *   16:05 for a clean read.
+ *   Audit battery: D1 16:00 update wired and flag-independent; freshness 6d and
+ *   400-bar headroom confirmed; single compute chokepoint (3 call sites); cross-
+ *   run signal dedup intact; token-failure path logs and reports; ZERO new
+ *   subrequests (diff vs pre-fix baseline shows no added fetches); entry path
+ *   (placeGTT single-leg) byte-identical.
+ *
+ * Changelog v4.16 (12-Jun-2026) — ROOT-CAUSE FIX: forming-bar pollution.
+ *   Diagnosed two real bugs from D1 parity evidence (RELIANCE verify):
+ *   BUG A (forming bar): Kite's day-historical endpoint returns TODAY'S still-
+ *     forming bar during market hours. At the 09:30 scan its volume is ~zero, so
+ *     volRatio (= lastBarVol / 20d-avg) collapses to ~0.05 and the hard volume gate
+ *     (volRatio < 0.8 -> reject) rejected nearly every stock -> 131 fetched, 1
+ *     passed, 0 candidates. PROVEN: two verify reads 12 min apart showed live
+ *     lastClose/volRatio/rsi moving with the open session while D1 stayed fixed.
+ *     This silently crippled EVERY market-open scan (post-close runs worked because
+ *     the bar was complete). FIX: pipeComputeIndicatorsFromCandles drops today's bar
+ *     (IST-aware date check on candle[0]) before computing -> indicators use only
+ *     COMPLETED bars. Shared by live + D1 paths, so it also fixes parity (D1 stores
+ *     only completed bars; live now matches). The separate live-price breakout
+ *     monitor still catches intraday breakouts; the scanner finds setups on closed
+ *     bars (matches documented workflow).
+ *   BUG B (window mismatch): D1 read cutoff used bare PIPE_OHLCV_RANGE while the live
+ *     fetch uses (PIPE_OHLCV_RANGE + 10). D1 dropped ~10 of the oldest bars live
+ *     keeps -> different bar set -> recursive EMA chain shifted (candleCount 246 vs
+ *     256, EMA ~0.3%). FIX: D1 cutoff now uses the identical +10.
+ *   Together these drive live-vs-D1 to parity AND restore market-open candidates.
+ *   Entry path (placeGTT single-leg) byte-identical. No scope creep.
  *
  * Changelog v4.15 (11-Jun-2026) — Cron-driven backfill (replaces self-fetch).
  *   Cloudflare blocks a Worker from fetching its own URL, so the v4.13 self-chaining
@@ -2011,6 +2056,38 @@ async function pipeFetchOhlcvSymbol(env, token, symbol, instrToken) {
 // candles: array of [timestamp, open, high, low, close, volume]. This is the
 // SINGLE source of indicator math. Do not duplicate this logic anywhere.
 function pipeComputeIndicatorsFromCandles(symbol, candles) {
+  // ── FORMING-BAR GUARD (root-cause fix 12-Jun-2026; time-aware in v4.17) ──────
+  // Kite's day-historical endpoint returns TODAY'S still-forming bar during market
+  // hours. At the 09:30 scan its volume is ~zero, so volRatio (= lastBarVol /
+  // 20d-avg) collapses to ~0.05 and the hard volume gate (volRatio < 0.8 -> reject)
+  // rejected almost every stock -> 0 candidates at open. It also broke D1 parity
+  // (live carried the forming bar; D1 stores only completed bars). PROVEN: two
+  // verify reads 12 min apart showed live lastClose/volRatio/rsi tracking the open
+  // session while D1 stayed fixed.
+  // TIME-AWARE RULE (v4.17 — self-audit caught a v4.16 regression): drop today's
+  // bar ONLY while it is still forming, i.e. before 15:45 IST (15:30 close + buffer
+  // for the closing session). AFTER 15:45 IST today's bar is COMPLETE and must be
+  // KEPT — evening runs (e.g. last night 20:46, which found 3 candidates) depend on
+  // today's full-volume bar. Unconditional dropping would have silently staled
+  // every post-close scan to yesterday's data.
+  // Known benign window: 15:45–16:00 IST live keeps today's bar but D1 only gains
+  // it at the 16:00 daily update -> /d1/verify in that 15-min window may say REVIEW.
+  // No scheduled scan runs in that window; verify after 16:05 for a clean read.
+  if (candles && candles.length > 1) {
+    const lastTs = candles[candles.length - 1][0]; // ISO string e.g. "2026-06-12T00:00:00+0530"
+    if (lastTs) {
+      const barDate  = String(lastTs).slice(0, 10);                    // 'YYYY-MM-DD'
+      // IST clock (UTC + 5h30m), independent of server TZ.
+      const istNow   = new Date(Date.now() + (5 * 60 + 30) * 60000);
+      const istToday = istNow.toISOString().slice(0, 10);
+      const istMins  = istNow.getUTCHours() * 60 + istNow.getUTCMinutes();
+      const BAR_COMPLETE_IST_MINS = 15 * 60 + 45;  // 15:45 IST
+      if (barDate === istToday && istMins < BAR_COMPLETE_IST_MINS) {
+        candles = candles.slice(0, -1); // drop the incomplete forming bar
+      }
+    }
+  }
+
   const opens   = candles.map(function(c) { return c[1]; });
   const highs   = candles.map(function(c) { return c[2]; });
   const lows    = candles.map(function(c) { return c[3]; });
@@ -2130,9 +2207,12 @@ async function d1ReadCandles(env, symbol) {
     // PIPE_OHLCV_RANGE days). EMA is recursive, so to be byte-identical the D1 path
     // must compute on the SAME bar set — i.e. the same calendar-date cutoff, NOT a
     // fixed bar count (holiday counts vary). We store 400 bars for headroom but only
-    // feed bars on/after the live cutoff into the math. (Verified: matching the bar
-    // set drives EMA200 divergence to 0.00%; a fixed-count trim left ~0.16% residual.)
-    const cutoffMs  = Date.now() - PIPE_OHLCV_RANGE * 86400000;
+    // feed bars on/after the live cutoff into the math.
+    // PARITY FIX (12-Jun): live fetches from (PIPE_OHLCV_RANGE + 10) days back
+    // (pipeFetchOhlcvSymbol line ~1974), NOT the bare range. The D1 cutoff MUST use
+    // the identical +10 or D1 drops ~10 of the oldest bars live keeps → different bar
+    // set → recursive EMA chain shifts (proven: candleCount 246 vs 256, EMA ~0.3%).
+    const cutoffMs  = Date.now() - (PIPE_OHLCV_RANGE + 10) * 86400000;
     const cutoffStr = new Date(cutoffMs).toISOString().slice(0, 10); // 'YYYY-MM-DD'
     const windowed  = rows.filter(function(r) { return r.bar_date >= cutoffStr; });
     // Guard: if the windowed set is too short (gappy history), use what we have but
